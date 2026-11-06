@@ -1,0 +1,30 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Machine Learning assets (uploaded separately to Hugging Face)
+backend/data/*
+!backend/data/.gitkeep
+
+backend/models/*
+!backend/models/.gitkeep
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

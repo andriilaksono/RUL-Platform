@@ -1,0 +1,6 @@
+{
+  "name": "Turbofan Engine RUL Simulation",
+  "description": "High-fidelity NASA C-MAPSS turbofan predictive maintenance simulation, real-time cycle playback, RUL estimation with XGBoost & Bi-LSTM, and multi-sensor diagnostics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
