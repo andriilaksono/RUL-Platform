@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from src.preprocessing import DATASETS, prepare_subset
 from src.model_loader import load_xgboost, load_bilstm
-from src.simulation import get_cycle_snapshot
+from src.simulation import get_cycle_snapshot, get_engine_trajectory
 
 APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR.parent
@@ -19,12 +20,23 @@ app = FastAPI(
     description="Backend inference NASA C-MAPSS menggunakan pipeline dan model asli.",
 )
 
+# Dev origins: Vite default (5173) and this project's `npm run dev` port (3000).
+# Extra origins (e.g. a deployed frontend) via RUL_CORS_ORIGINS, comma-separated.
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+EXTRA_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("RUL_CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=DEFAULT_CORS_ORIGINS + EXTRA_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,11 +57,20 @@ def get_prepared_subset(subset_id: str):
 
 
 @lru_cache(maxsize=4)
+def get_xgb_model(subset_id: str):
+    return load_xgboost(subset_id)
+
+
+@lru_cache(maxsize=4)
+def get_bilstm_model(subset_id: str):
+    return load_bilstm(subset_id)
+
+
 def get_models(subset_id: str):
     # Models are loaded from the actual JSON and .keras artifacts.
     return {
-        "xgboost": load_xgboost(subset_id),
-        "bilstm": load_bilstm(subset_id),
+        "xgboost": get_xgb_model(subset_id),
+        "bilstm": get_bilstm_model(subset_id),
     }
 
 
@@ -131,6 +152,75 @@ def list_engines(subset_id: str):
         raise HTTPException(status_code=500, detail=f"Gagal membaca engine {subset_id}: {exc}") from exc
 
 
+@app.get("/api/{subset_id}/engines/{engine_id}/history")
+def engine_history(
+    subset_id: str,
+    engine_id: int,
+    include_xgboost: bool = True,
+    include_bilstm: bool = True,
+):
+    """
+    All cycles of one engine in one response: real sensor values,
+    normalized values, operating settings, ground-truth RUL and model
+    predictions. If a model file is missing, its predictions are null
+    and the reason is listed in `model_errors`; the data still loads.
+    """
+    subset_id = validate_subset(subset_id)
+    try:
+        prepared = get_prepared_subset(subset_id)
+
+        if engine_id not in set(prepared["train"]["unit_number"].unique()):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Engine {engine_id} tidak ditemukan pada {subset_id}.",
+            )
+
+        model_errors = {}
+        xgb_model = lstm_model = None
+
+        if include_xgboost:
+            try:
+                xgb_model = get_xgb_model(subset_id)
+            except Exception as exc:
+                model_errors["xgboost"] = str(exc)
+
+        if include_bilstm:
+            try:
+                lstm_model = get_bilstm_model(subset_id)
+            except Exception as exc:
+                model_errors["bilstm"] = str(exc)
+
+        cycles = get_engine_trajectory(
+            prepared,
+            engine_id,
+            xgb_model=xgb_model,
+            lstm_model=lstm_model,
+        )
+
+        return {
+            "dataset": subset_id,
+            "engine_id": engine_id,
+            "min_cycle": cycles[0]["cycle"],
+            "max_cycle": cycles[-1]["cycle"],
+            "sequence_length": prepared["sequence_length"],
+            "models_available": {
+                "xgboost": xgb_model is not None,
+                "bilstm": lstm_model is not None,
+            },
+            "model_errors": model_errors,
+            "source": "NASA C-MAPSS training split + trained model inference",
+            "cycles": cycles,
+        }
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=424, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Riwayat {subset_id} gagal: {exc}"
+        ) from exc
+
+
 @app.post("/api/{subset_id}/snapshot")
 def predict_snapshot(subset_id: str, request: SnapshotRequest):
     subset_id = validate_subset(subset_id)
@@ -153,13 +243,12 @@ def predict_snapshot(subset_id: str, request: SnapshotRequest):
                 detail=f"Cycle harus berada pada rentang {first_cycle} sampai {last_cycle}.",
             )
 
-        models = get_models(subset_id)
         result = get_cycle_snapshot(
             data=prepared,
             engine_id=request.engine_id,
             cycle=request.cycle,
-            xgb_model=models["xgboost"] if request.include_xgboost else None,
-            lstm_model=models["bilstm"] if request.include_bilstm else None,
+            xgb_model=get_xgb_model(subset_id) if request.include_xgboost else None,
+            lstm_model=get_bilstm_model(subset_id) if request.include_bilstm else None,
         )
         result["dataset"] = subset_id
         result["source"] = "NASA C-MAPSS training split + trained model inference"
@@ -180,5 +269,6 @@ def predict_snapshot(subset_id: str, request: SnapshotRequest):
 @app.post("/api/admin/cache/clear")
 def clear_cache():
     get_prepared_subset.cache_clear()
-    get_models.cache_clear()
+    get_xgb_model.cache_clear()
+    get_bilstm_model.cache_clear()
     return {"status": "cleared"}

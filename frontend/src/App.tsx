@@ -20,15 +20,17 @@ import {
   AlertTriangle,
   Download,
   Code2,
+  Loader2,
+  WifiOff,
 } from 'lucide-react';
 
 import {
   DATASET_CONFIG,
   PREFERRED_SENSORS,
   ALL_SENSORS,
-  generateEngineData,
   SENSOR_METADATA,
 } from './data/cmapssData';
+import { useEngineData, useEngineList } from './hooks/useEngineData';
 
 import { TurbofanSchematic } from './components/TurbofanSchematic';
 import { MetricCard } from './components/MetricCard';
@@ -71,13 +73,26 @@ export default function App() {
     }
   };
 
-  // Generate or memoize engine dataset
-  const engineDataset = useMemo(() => {
-    return generateEngineData(selectedDatasetId, selectedEngineId);
-  }, [selectedDatasetId, selectedEngineId]);
+  // Engine list + real telemetry/predictions come from the FastAPI backend
+  const engineList = useEngineList(selectedDatasetId);
+  const {
+    status: dataStatus,
+    dataset: engineDataset,
+    models: modelInfo,
+    error: dataError,
+    reload: reloadData,
+  } = useEngineData(selectedDatasetId, selectedEngineId);
 
-  const maxCycle = engineDataset.maxCycle;
-  const minCycle = engineDataset.minCycle;
+  const maxCycle = engineDataset?.maxCycle ?? 1;
+  const minCycle = engineDataset?.minCycle ?? 1;
+
+  // If the selected engine does not exist in the newly selected dataset, fall back
+  useEffect(() => {
+    const list = engineList.engines;
+    if (list && list.length > 0 && !list.some((e) => e.engine_id === selectedEngineId)) {
+      setSelectedEngineId(list[0].engine_id);
+    }
+  }, [engineList.engines, selectedEngineId]);
 
   // Reset cycle when dataset or engine changes
   useEffect(() => {
@@ -112,17 +127,19 @@ export default function App() {
 
   // Get active cycle snapshot
   const currentSnapshot = useMemo(() => {
-    const idx = Math.min(currentCycle - 1, engineDataset.snapshots.length - 1);
+    if (!engineDataset) return null;
+    const idx = Math.min(currentCycle - minCycle, engineDataset.snapshots.length - 1);
     return (
-      engineDataset.snapshots[idx] ||
+      engineDataset.snapshots[Math.max(0, idx)] ||
       engineDataset.snapshots[engineDataset.snapshots.length - 1]
     );
-  }, [currentCycle, engineDataset]);
+  }, [currentCycle, minCycle, engineDataset]);
 
   // Get history up to current cycle
   const currentHistory = useMemo(() => {
-    return engineDataset.snapshots.slice(0, currentCycle);
-  }, [currentCycle, engineDataset]);
+    if (!engineDataset) return [];
+    return engineDataset.snapshots.slice(0, currentCycle - minCycle + 1);
+  }, [currentCycle, minCycle, engineDataset]);
 
   // Playback controls handlers
   const handleTogglePlay = () => {
@@ -238,11 +255,16 @@ export default function App() {
                   onChange={(e) => setSelectedEngineId(Number(e.target.value))}
                   className="w-full bg-slate-950/70 border border-slate-800 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500/50"
                 >
-                  {[1, 2, 3, 4, 5].map((id) => (
-                    <option key={id} value={id}>
-                      Engine #{id} (Run-to-failure: {currentDatasetCfg.maxCycles[(id - 1) % 5]} cycles)
+                  {(engineList.engines ?? []).map((eng) => (
+                    <option key={eng.engine_id} value={eng.engine_id}>
+                      Engine #{eng.engine_id} (Run-to-failure: {eng.observed_cycles} cycles)
                     </option>
                   ))}
+                  {!engineList.engines && (
+                    <option value={selectedEngineId}>
+                      {engineList.loading ? 'Loading engines…' : `Engine #${selectedEngineId}`}
+                    </option>
+                  )}
                 </select>
               </div>
 
@@ -282,18 +304,47 @@ export default function App() {
             </div>
 
             <div className="space-y-2.5 text-xs font-mono">
-              <div className="flex items-center justify-between p-2 rounded-lg border border-slate-800/80 bg-slate-950/40">
-                <span className="text-slate-300">XGBoost Regressor</span>
-                <span className="text-emerald-400 flex items-center gap-1 font-semibold text-[11px]">
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Ready
-                </span>
-              </div>
-              <div className="flex items-center justify-between p-2 rounded-lg border border-slate-800/80 bg-slate-950/40">
-                <span className="text-slate-300">Bi-LSTM Recurrent</span>
-                <span className="text-emerald-400 flex items-center gap-1 font-semibold text-[11px]">
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Ready
-                </span>
-              </div>
+              {([
+                ['XGBoost Regressor', 'xgboost'],
+                ['Bi-LSTM Recurrent', 'bilstm'],
+              ] as const).map(([label, key]) => {
+                const state = !modelInfo
+                  ? dataStatus === 'loading'
+                    ? 'checking'
+                    : 'offline'
+                  : modelInfo.available[key]
+                  ? 'ready'
+                  : 'missing';
+                return (
+                  <div
+                    key={key}
+                    title={modelInfo?.errors[key] ?? undefined}
+                    className="flex items-center justify-between p-2 rounded-lg border border-slate-800/80 bg-slate-950/40"
+                  >
+                    <span className="text-slate-300">{label}</span>
+                    {state === 'ready' && (
+                      <span className="text-emerald-400 flex items-center gap-1 font-semibold text-[11px]">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Ready
+                      </span>
+                    )}
+                    {state === 'checking' && (
+                      <span className="text-slate-400 flex items-center gap-1 font-semibold text-[11px]">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking
+                      </span>
+                    )}
+                    {state === 'missing' && (
+                      <span className="text-amber-400 flex items-center gap-1 font-semibold text-[11px]">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Model file missing
+                      </span>
+                    )}
+                    {state === 'offline' && (
+                      <span className="text-rose-400 flex items-center gap-1 font-semibold text-[11px]">
+                        <WifiOff className="w-3.5 h-3.5" /> API offline
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
             <div className="mt-3 text-[11px] text-slate-500 font-mono">
               * Bi-LSTM uses a 30-cycle sliding window sequence buffer.
@@ -323,6 +374,39 @@ export default function App() {
             RIGHT MAIN STAGE (Adaptive Grid & Panels)
             ========================================================= */}
         <main className="flex-1 min-w-0 space-y-6">
+          {(!engineDataset || !currentSnapshot) ? (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-8 backdrop-blur-sm flex flex-col items-center justify-center text-center gap-3 min-h-[320px]">
+              {dataStatus === 'error' ? (
+                <>
+                  <WifiOff className="w-8 h-8 text-rose-400" />
+                  <h2 className="text-sm font-mono font-semibold text-slate-100">
+                    Gagal memuat data dari backend
+                  </h2>
+                  <p className="text-xs font-mono text-slate-400 max-w-md break-words">
+                    {dataError}
+                  </p>
+                  <button
+                    onClick={reloadData}
+                    className="mt-1 px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono font-semibold text-xs transition-colors"
+                  >
+                    Coba lagi
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+                  <h2 className="text-sm font-mono font-semibold text-slate-100">
+                    Memuat {selectedDatasetId} · Engine #{selectedEngineId}…
+                  </h2>
+                  <p className="text-xs font-mono text-slate-500 max-w-md">
+                    Pemuatan pertama untuk tiap dataset bisa memakan waktu karena backend
+                    menyiapkan data dan memuat model.
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+          <>
           {/* Engine Status & Execution Banner */}
           <div id="simulation" className="scroll-mt-20 rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-5 backdrop-blur-sm">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/80 mb-4">
@@ -412,11 +496,26 @@ export default function App() {
 
               <div className="flex justify-between items-center text-[10px] font-mono text-slate-500">
                 <span>Cycle 1 (Commissioning)</span>
-                <span>Operating Conditions: SL / ISA</span>
+                <span>
+                  Operating Conditions:{' '}
+                  {currentDatasetCfg.operatingConditions > 1
+                    ? `${currentDatasetCfg.operatingConditions} regimes`
+                    : 'SL / ISA'}
+                </span>
                 <span>Cycle {maxCycle} (Run-to-failure Limit)</span>
               </div>
             </div>
           </div>
+
+          {modelInfo && (!modelInfo.available.xgboost || !modelInfo.available.bilstm) && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs font-mono text-amber-300 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>
+                Sebagian prediksi model tidak tersedia:{' '}
+                {Object.values(modelInfo.errors).join(' · ') || 'file model tidak ditemukan'}
+              </span>
+            </div>
+          )}
 
           {/* Primary Metric Strip (Section 11 & 14 from user code) */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
@@ -628,6 +727,8 @@ export default function App() {
             selectedSensor={focusedSensor}
             onSelectSensor={(sId) => setFocusedSensor(sId)}
           />
+          </>
+          )}
         </main>
       </div>
 
@@ -645,7 +746,7 @@ export default function App() {
           <span>NASA C-MAPSS Benchmark Archive</span>
         </div>
         <div className="text-slate-400">
-          Historical simulation based on run-to-failure degradation physics
+          Historical playback of NASA C-MAPSS training data · predictions from trained XGBoost & Bi-LSTM via API
         </div>
       </footer>
     </div>

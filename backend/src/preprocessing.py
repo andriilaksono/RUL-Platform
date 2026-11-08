@@ -306,9 +306,16 @@ def prepare_subset(subset_id, data_dir=DATA_DIR):
         ["unit_number", "time_cycles"]
     ).reset_index(drop=True)
 
+    # Raw (un-normalized) training rows, sorted identically to train_norm.
+    # Used only for display (real sensor values / operating settings).
+    train_raw = df_train_raw.sort_values(
+        ["unit_number", "time_cycles"]
+    ).reset_index(drop=True)
+
     return {
         "dataset": subset_id,
         "train": train_norm,
+        "train_raw": train_raw,
         "test": test_norm,
         "features": feature_cols,
         "dropped_features": dropped_cols,

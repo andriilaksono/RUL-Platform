@@ -7,7 +7,8 @@ New standalone project based on the user's Streamlit RUL pipeline and AI Studio 
 - `backend/src/` contains the original preprocessing, model-loader, and simulation modules copied from the Streamlit project.
 - The FastAPI backend supports FD001, FD002, FD003, and FD004.
 - Backend inference loads the actual XGBoost JSON and Bi-LSTM `.keras` artifacts on demand.
-- The React frontend is copied from the AI Studio ZIP and is **not yet connected** to the API. Its current `src/data/cmapssData.ts` still generates synthetic/demo data. Do not treat frontend values as real model predictions until API integration is completed.
+- The React frontend is now **connected to the API**. Engine lists, sensor telemetry, ground-truth RUL and XGBoost / Bi-LSTM predictions all come from the backend (`frontend/src/api/client.ts`). The old synthetic data generator was removed.
+- Still to do: compare identical dataset/engine/cycle predictions against the original Streamlit app before treating the UI values as validated.
 
 ## 1. Required assets
 
@@ -48,7 +49,8 @@ API docs: http://127.0.0.1:8000/docs
 - `GET /api/datasets`
 - `GET /api/{FD001|FD002|FD003|FD004}/metadata`
 - `GET /api/{FD001|FD002|FD003|FD004}/engines`
-- `POST /api/{FD001|FD002|FD003|FD004}/snapshot`
+- `GET /api/{FD001|FD002|FD003|FD004}/engines/{engine_id}/history` — all cycles of one engine (real sensors, normalized sensors, operating settings, ground-truth RUL, XGBoost + Bi-LSTM predictions). This is what the frontend uses.
+- `POST /api/{FD001|FD002|FD003|FD004}/snapshot` — single cycle prediction
 
 Example request:
 
@@ -61,6 +63,20 @@ Example request:
 }
 ```
 
+## 3b. Run the frontend
+
+Start the backend first (section 2), then in a second terminal:
+
+```powershell
+cd D:\Andri\RUL-Platform\frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000. In development Vite forwards `/api/*` to `http://127.0.0.1:8000`, so no extra configuration is needed. To point at a backend running elsewhere, copy `frontend/.env.example` to `.env` and set `VITE_DEV_API_TARGET` (dev proxy) or `VITE_API_BASE_URL` (deployed backend; then add the frontend's origin to `RUL_CORS_ORIGINS` in the backend environment, comma-separated).
+
+If the backend is not running, or a model/data file is missing, the UI shows a message instead of fake numbers.
+
 ## 4. Methodology note
 
 This first backend preserves the current Streamlit behavior: historical playback and `actual_rul` are derived from the training split. The `test_FDxxx.txt` and `RUL_FDxxx.txt` files are copied for future evaluation endpoints, but this API does not currently claim to be test-set evaluation or live engine monitoring.
@@ -69,4 +85,6 @@ For FD002 and FD004, the original condition-aware KMeans + per-cluster MinMaxSca
 
 ## 5. Next step
 
-Connect the React UI to these endpoints, then compare identical dataset/engine/cycle predictions against the original Streamlit application before enabling real prediction labels in the UI.
+Compare identical dataset/engine/cycle predictions against the original Streamlit application before enabling real prediction labels in the UI.
+
+`tests/test_backend_synthetic.py` checks the API wiring (CORS, `/history` vs `/snapshot` consistency, error handling) on synthetic data in a temporary copy of `backend/`; it does not validate model accuracy.
